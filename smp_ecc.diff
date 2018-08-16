@@ -1,0 +1,113 @@
+diff --git a/net/bluetooth/ecc.c b/net/bluetooth/ecc.c
+index e1709f8..ffca0e8 100644
+--- a/net/bluetooth/ecc.c
++++ b/net/bluetooth/ecc.c
+@@ -58,10 +58,28 @@ typedef struct {
+ 
+ #define CURVE_N_32 {	0xF3B9CAC2FC632551ull, 0xBCE6FAADA7179E84ull,	\
+ 			0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFF00000000ull }
++#define CURVE_B_32 {	0x3BCE3C3E27D2604Bull, 0x651D06B0CC53B0F6ull,	\
++			0xB3EBBD55769886BCull, 0x5AC635D8AA3A93E7ull }
+ 
+ static u64 curve_p[NUM_ECC_DIGITS] = CURVE_P_32;
+ static struct ecc_point curve_g = CURVE_G_32;
+ static u64 curve_n[NUM_ECC_DIGITS] = CURVE_N_32;
++static u64 curve_b[NUM_ECC_DIGITS] = CURVE_B_32;
++
++/* Returns true if left == right, false for otherwise. */
++static bool vli_equal(const u64 *left, const u64 *right)
++{
++	int i;
++	u64 diff=0;
++
++	for (i = NUM_ECC_DIGITS - 1; i >= 0; i--) {
++		diff |= (left[i] ^ right[i]);
++	}
++	if (diff == 0)
++		return true;
++
++	return false;
++}
+ 
+ static void vli_clear(u64 *vli)
+ {
+@@ -814,3 +832,33 @@ bool ecdh_shared_secret(const u8 public_key[64], const u8 private_key[32],
+ 
+ 	return !ecc_point_is_zero(&product);
+ }
++
++bool ecc_valid_public_key(const u8 public_key[64])
++{
++	struct ecc_point pk;
++	u64 tmp1[NUM_ECC_DIGITS];
++	u64 tmp2[NUM_ECC_DIGITS];
++	u64 _3[NUM_ECC_DIGITS] = {3}; /* -a = 3 */
++
++	ecc_bytes2native(public_key, pk.x);
++	ecc_bytes2native(&public_key[32], pk.y);
++
++	/* The point at infinity is invalid. */
++	if (ecc_point_is_zero(&pk)) {
++		return false;
++	}
++
++	/* x and y must be smaller than p. */
++	if (vli_cmp(curve_p , pk.x) != 1 ||
++			vli_cmp(curve_p , pk.y) != 1) {
++		return false;
++	}
++
++	vli_mod_square_fast(tmp1,pk.y);         /* tmp1 = y^2      */
++	vli_mod_square_fast(tmp2,pk.x);         /* tmp2 = x^2      */
++	vli_mod_sub(tmp2,tmp2,_3,curve_p);      /* tmp2 = x^2-3    */
++	vli_mod_mult_fast(tmp2,tmp2,pk.x);      /* tmp2 = x^3-3x   */
++	vli_mod_add(tmp2,tmp2,curve_b,curve_p); /* tmp2 = x^3-ax+b */
++
++	return vli_equal(tmp1,tmp2);
++}
+diff --git a/net/bluetooth/ecc.h b/net/bluetooth/ecc.h
+index 8d6a2f4..19acca8 100644
+--- a/net/bluetooth/ecc.h
++++ b/net/bluetooth/ecc.h
+@@ -52,3 +52,12 @@ bool ecc_make_key(u8 public_key[64], u8 private_key[32]);
+  */
+ bool ecdh_shared_secret(const u8 public_key[64], const u8 private_key[32],
+ 		        u8 secret[32]);
++
++/* ecc_valid_public_key() function.
++ * Check to see if a public key is valid.
++ * Inputs:
++ *    public_key - The public key to check.
++ *
++ * Returns ture if the public key is valid, false if it is invalid.
++ */
++bool ecc_valid_public_key(const u8 public_key[64]);
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index ffed8a1..e6dfaff 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -2653,6 +2653,12 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
+ 	SMP_DBG("Remote Public Key X: %32phN", smp->remote_pk);
+ 	SMP_DBG("Remote Public Key Y: %32phN", smp->remote_pk + 32);
+ 
++	/* Verify the received public key */
++	if (!ecc_valid_public_key(smp->remote_pk)) {
++		BT_ERR("The received public key is invalid");
++		return SMP_INVALID_HCI_CMD_PARAMS;
++	}
++
+ 	if (!ecdh_shared_secret(smp->remote_pk, smp->local_sk, smp->dhkey))
+ 		return SMP_UNSPECIFIED;
+ 
+diff --git a/net/bluetooth/smp.h b/net/bluetooth/smp.h
+index ffcc70b..8fc3d55 100644
+--- a/net/bluetooth/smp.h
++++ b/net/bluetooth/smp.h
+@@ -137,6 +137,7 @@ struct smp_cmd_keypress_notify {
+ #define SMP_NUMERIC_COMP_FAILED		0x0c
+ #define SMP_BREDR_PAIRING_IN_PROGRESS	0x0d
+ #define SMP_CROSS_TRANSP_NOT_ALLOWED	0x0e
++#define SMP_INVALID_HCI_CMD_PARAMS      0x12
+ 
+ #define SMP_MIN_ENC_KEY_SIZE		7
+ #define SMP_MAX_ENC_KEY_SIZE		16
